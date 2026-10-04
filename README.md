@@ -14,6 +14,7 @@ deskon/                     package Python
 └── services/
     ├── audit_service.py    satu-satunya penulis review.review_events
     ├── finding_service.py  use case finding review (create_review_finding)
+    ├── reselection_service.py  use case reselection klaim (create_reselection)
     └── review_service.py   use case lifecycle review (open_review_cycle, close_review)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)
@@ -33,6 +34,7 @@ behavior script lama.
 | `review_service.open_review_cycle(conn, nosjp=, opened_by=, review_type=None)` | `create_new_review_cycle_v1.py` | `REVIEW_OPENED` |
 | `finding_service.create_review_finding(conn, review_id=, finding_category=, finding_title=, finding_description=, created_by=)` | `create_review_finding_v1.py` | `FINDING_CREATED` |
 | `review_service.close_review(conn, review_id=, closed_by=, final_decision=, resolution_note=)` | `close_review_v1.py` | `REVIEW_CLOSED` |
+| `reselection_service.create_reselection(conn, review_id=, created_by=, target_type=, action=, original_code=, reason=, original_description=None, proposed_code=None, proposed_description=None)` | `create_reselection_v1.py` | `RESELECTION_CREATED` |
 
 `open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
 klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
@@ -63,6 +65,28 @@ review dikunci `FOR NO KEY UPDATE OF cr`: berkonflik dengan `FOR SHARE` milik
 `create_review_finding`, dengan penutupan lain, dan dengan `open_review_cycle`,
 tetapi tidak menahan FK check dan tidak mengunci baris klaim. Klaim yang perlu
 direview lagi mendapat cycle baru lewat `open_review_cycle`.
+
+`create_reselection`: `action` (`CHANGE`/`DROP`) dan `target_type`
+(`DIAGNOSIS`/`PROCEDURE`) di-strip dan di-upper; `original_code` dan `reason`
+di-strip dan wajib; description kosong disimpan `NULL`; kode maksimal 100
+karakter. `CHANGE` mewajibkan `proposed_code`. `DROP` menyimpan `proposed_code`
+dan `proposed_description` sebagai `NULL`; request ditolak (`ValidationError`),
+tidak diabaikan, jika `proposed_code` atau `proposed_description` terisi. Nilai
+kosong atau hanya whitespace dianggap tidak diberikan. Tidak ada pemeriksaan bahwa
+`original_code` ada pada klaim, bahwa `original_code` berbeda dari
+`proposed_code`, atau bahwa usulan tidak ganda (sama dengan script lama).
+User harus ada dan aktif; review harus ada dan OPEN. `claim_id` diambil dari
+review dan tidak diterima dari pemanggil. Reselection disimpan `PROPOSED`
+dengan `created_by`; `agreed_by`, `agreed_at`, dan `corrects_reselection_id`
+selalu `NULL`. Event `RESELECTION_CREATED` memakai entity `claim_reselection`
+dan `event_data` berisi identitas review + `reselection_id`, `target_type`,
+`action`, `original_code`, `proposed_code` (`null` pada DROP); deskripsi dan
+reason tidak ikut. Baris review dikunci `FOR SHARE OF cr` (baris klaim tidak
+dikunci): penutupan review (`close_review`) dan pembuatan reselection pada
+review yang sama berjalan berurutan, begitu juga `open_review_cycle` pada
+review OPEN yang sama, sedangkan beberapa reselection dan finding tetap bisa
+dibuat bersamaan. Reselection `PROPOSED` yang sudah dibuat tetap apa adanya
+saat review ditutup.
 
 ## Migration
 

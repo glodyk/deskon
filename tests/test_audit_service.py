@@ -139,3 +139,12 @@ def test_list_review_events_maps_legacy_names_without_rewriting(conn, review_fix
     events = audit_service.list_review_events(conn, fx["review_id"])
     assert [e.event_type for e in events] == ["REVIEW_CYCLE_CREATED", "REVIEW_OPENED"]
     assert [e.canonical_event_type for e in events] == ["REVIEW_OPENED", "REVIEW_OPENED"]
+
+
+def test_audit_service_adds_only_identity_metadata(conn, review_fixture):
+    payload = {"final_decision": "LAYAK", "resolution_note": "ok"}
+    event = _record(
+        conn, review_fixture,
+        event_type=EventType.REVIEW_CLOSED, payload=payload,
+    )
+    assert set(event.event_data) == {"claim_id", "nosjp", "review_id"} | set(payload)

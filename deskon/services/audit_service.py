@@ -5,9 +5,14 @@ Prinsip:
 - ingestion/infrastruktur (import batch, promote) -> bukan review_events;
 - event ditulis lewat koneksi caller, setelah operasi bisnis berhasil,
   sehingga ikut rollback bersama transaksinya;
-- event_data dibangun dengan json.dumps dan selalu memuat
-  claim_id, nosjp, review_id (diambil dari database, bukan dari caller);
-- data historis tidak pernah di-rewrite; nama legacy hanya dipetakan saat dibaca.
+- event_data = metadata identitas + payload dari use case, dibangun dengan
+  json.dumps. Metadata identitas (claim_id, nosjp, review_id) diambil dari
+  review yang dirujuk dan tidak boleh ditimpa payload. Modul ini tidak
+  menambah business payload sendiri dan tidak mengetahui detail
+  finding/reselection/review cycle;
+- WRITE hanya menerima nama kanonik; nama legacy ditolak.
+  Data historis tidak pernah di-rewrite; nama legacy hanya
+  diterjemahkan saat READ (list_review_events).
 """
 
 import json
@@ -66,7 +71,10 @@ def _require_int(name, value):
 
 
 def build_event_data(claim_id, nosjp, review_id, payload=None):
-    """event_data = field dasar + payload use case. Payload tidak boleh menimpa field dasar."""
+    """event_data = metadata identitas + payload use case, tanpa tambahan lain.
+
+    Payload tidak boleh menimpa metadata identitas.
+    """
     payload = dict(payload or {})
     overlap = sorted(set(payload) & set(EVENT_DATA_BASE_KEYS))
     if overlap:

@@ -97,7 +97,12 @@ EVENT_DATA_BASE_KEYS = ("claim_id", "nosjp", "review_id")
 
 
 # ---------------------------------------------------------------------------
-# Audit: alias legacy (hanya untuk query history; data lama tidak di-rewrite)
+# Audit: alias legacy
+#
+# READ saja. Alias ini hanya dipakai untuk menerjemahkan event lama saat
+# query history. WRITE hanya menerima nama kanonik: audit_service menolak
+# nama legacy (mis. REVIEW_CYCLE_CREATED, entity REVIEW_FINDING).
+# Data historis tidak di-rewrite.
 # ---------------------------------------------------------------------------
 
 LEGACY_EVENT_TYPE_ALIASES = {
@@ -110,12 +115,12 @@ LEGACY_ENTITY_TYPE_ALIASES = {
 
 
 def canonical_event_type(value):
-    """Nama kanonik untuk event_type yang tersimpan (legacy atau baru)."""
+    """READ: nama kanonik untuk event_type yang tersimpan. Bukan untuk WRITE."""
     return LEGACY_EVENT_TYPE_ALIASES.get(value, value)
 
 
 def canonical_entity_type(value):
-    """Nama kanonik untuk entity_type yang tersimpan (legacy atau baru)."""
+    """READ: nama kanonik untuk entity_type yang tersimpan. Bukan untuk WRITE."""
     return LEGACY_ENTITY_TYPE_ALIASES.get(value, value)
 
 

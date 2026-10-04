@@ -32,7 +32,19 @@ behavior script lama.
 
 File migration yang sudah locked tidak diubah; perubahan schema berikutnya
 menjadi file baru. File migration tidak berisi `BEGIN/COMMIT`; runner yang
-memegang transaksi.
+memegang transaksi:
+
+```
+database/schema/*.sql -> migration runner -> transaction -> database
+```
+
+**Migration runner aplikasi/CLI masih TODO.** Fixture di `tests/conftest.py`
+hanya memuat schema ke database tes sementara; itu bukan migration runner
+aplikasi dan tidak boleh dipakai untuk DEV/produksi.
+
+**Kompatibilitas PostgreSQL 14 belum diverifikasi.** `001_baseline.sql` berasal
+dari pg_dump PostgreSQL 14, tetapi tes baru dijalankan di PostgreSQL 16.
+Smoke test di PostgreSQL 14 wajib dilakukan sebelum DEV memakai migration ini.
 
 ## Kontrak service layer
 
@@ -64,13 +76,22 @@ menjadi jejak import.
   use case-nya ada.
 - `preliminary_note` adalah entity_type kanonik tanpa event untuk saat ini
   (note bisa ada sebelum review, sedangkan `review_events.review_id` wajib).
-- Setiap `event_data` baru memuat `claim_id`, `nosjp`, `review_id` ditambah
-  payload use case, dibangun dengan `json.dumps`. `claim_id` dan `nosjp`
-  diambil dari review yang dirujuk.
+- `event_data` = metadata identitas (`claim_id`, `nosjp`, `review_id`) +
+  payload dari use case, dibangun dengan `json.dumps`. Metadata identitas
+  diambil dari review yang dirujuk dan tidak boleh ditimpa payload.
+  `audit_service` tidak menambah business payload sendiri, sehingga tetap
+  generik dan tidak mengetahui detail finding/reselection/review cycle.
 - Event ditulis lewat koneksi caller setelah operasi berhasil, sehingga ikut
   rollback bersama transaksinya.
-- Data historis tidak di-rewrite. Nama legacy dipetakan hanya saat dibaca:
-  `REVIEW_CYCLE_CREATED` -> `REVIEW_OPENED`, entity `REVIEW_FINDING` -> `review_finding`.
+- Nama legacy hanya berlaku saat **READ** (alias untuk query history).
+  **WRITE** hanya menerima nama kanonik; `audit_service` menolak nama legacy.
+  Data historis tidak di-rewrite.
+
+  | Arah | Legacy | Kanonik |
+  |---|---|---|
+  | READ | event `REVIEW_CYCLE_CREATED` | `REVIEW_OPENED` |
+  | READ | entity `REVIEW_FINDING` | `review_finding` |
+  | WRITE | nama legacy apa pun | ditolak (`AuditEventError`) |
 
 ## Konfigurasi
 
@@ -93,3 +114,6 @@ direktori temp, memuat `database/schema/*.sql` berurutan, lalu menghapusnya.
 Tidak menyentuh database DEV. Jika binary PostgreSQL tidak ditemukan, tes
 database di-skip; set `DESKON_TEST_PG_BIN` (mis. `/usr/lib/postgresql/14/bin`)
 bila perlu. `initdb` tidak bisa dijalankan sebagai root.
+
+Tes saat ini dijalankan di PostgreSQL 16; PostgreSQL 14 belum diverifikasi
+(lihat bagian Migration).

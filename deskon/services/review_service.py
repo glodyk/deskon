@@ -1,7 +1,7 @@
 """Use case lifecycle review klaim (review.claim_reviews).
 
-Saat ini berisi `open_review_cycle`. Use case lain (`close_review`, ...)
-ditambahkan di modul ini secara bertahap.
+Saat ini berisi `open_review_cycle` dan `close_review`. Use case lifecycle
+lain ditambahkan di modul ini secara bertahap.
 
 Semua fungsi menerima koneksi dari caller, tidak commit/rollback, tidak
 print, mengembalikan dataclass, dan melempar exception dari deskon.errors.
@@ -12,7 +12,13 @@ from datetime import datetime
 
 from psycopg2 import errors as pg_errors
 
-from deskon.constants import REVIEW_TYPES, EntityType, EventType, ReviewStatus
+from deskon.constants import (
+    FINAL_DECISIONS,
+    REVIEW_TYPES,
+    EntityType,
+    EventType,
+    ReviewStatus,
+)
 from deskon.errors import (
     ConflictError,
     InvalidStateError,
@@ -51,6 +57,28 @@ class OpenReviewCycleResult:
     # Hanya diisi jika created: review sebelumnya untuk klaim ini, urut cycle.
     previous_review_ids: tuple[int, ...]
     event: ReviewEvent | None
+
+
+@dataclass(frozen=True)
+class ClosedReview:
+    id: int
+    claim_id: int
+    nosjp: str
+    status: str
+    review_type: str
+    cycle_no: int
+    final_decision: str
+    resolution_note: str
+    opened_by: int
+    opened_at: datetime
+    closed_by: int
+    closed_at: datetime
+
+
+@dataclass(frozen=True)
+class CloseReviewResult:
+    review: ClosedReview
+    event: ReviewEvent
 
 
 _REVIEW_COLUMNS = "id, claim_id, status, review_type, cycle_no, opened_by, opened_at"
@@ -222,3 +250,136 @@ def open_review_cycle(conn, *, nosjp, opened_by, review_type=None):
         previous_review_ids=previous_review_ids,
         event=event,
     )
+
+
+def close_review(conn, *, review_id, closed_by, final_decision, resolution_note):
+    """Tutup review OPEN dengan keputusan akhir. Tidak commit.
+
+    - final_decision di-strip dan di-upper (seperti script lama), lalu harus
+      LAYAK, TIDAK_LAYAK, atau RESELEKSI.
+    - resolution_note di-strip dan wajib tidak kosong (seperti script lama).
+    - User `closed_by` harus ada dan aktif.
+    - Review harus ada dan berstatus OPEN; review CLOSED tidak pernah diubah.
+    - Review menjadi CLOSED dengan final_decision, resolution_note, closed_by,
+      dan closed_at. Finding, reselection, komentar, dan klaim tidak disentuh.
+      Event REVIEW_CLOSED ditulis lewat audit_service di transaksi yang sama.
+
+    Konkurensi: baris review dikunci FOR NO KEY UPDATE sebelum status
+    diperiksa. Mode ini berkonflik dengan FOR SHARE milik
+    create_review_finding, dengan penutupan lain, dan dengan FOR UPDATE milik
+    open_review_cycle, sehingga semuanya berjalan berurutan dan pihak yang
+    menunggu membaca status terbaru. FK check (FOR KEY SHARE) dari insert
+    lain tidak tertahan, dan baris klaim tidak dikunci.
+    """
+    _require_int("review_id", review_id)
+    _require_int("closed_by", closed_by)
+    if not isinstance(final_decision, str):
+        raise ValidationError(f"final_decision harus string, bukan {final_decision!r}")
+    final_decision = final_decision.strip().upper()
+    if final_decision not in FINAL_DECISIONS:
+        raise ValidationError(
+            f"final_decision tidak valid: {final_decision!r}; "
+            f"harus salah satu dari {', '.join(sorted(FINAL_DECISIONS))}"
+        )
+    if resolution_note is not None and not isinstance(resolution_note, str):
+        raise ValidationError(f"resolution_note harus string, bukan {resolution_note!r}")
+    resolution_note = resolution_note.strip() if resolution_note is not None else ""
+    if not resolution_note:
+        raise ValidationError("resolution_note wajib diisi ketika review ditutup.")
+
+    with conn.cursor() as cur:
+        # 1. User
+        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (closed_by,))
+        user = cur.fetchone()
+        if user is None:
+            raise NotFoundError(f"User id={closed_by} tidak ditemukan.")
+        if not user[0]:
+            raise InvalidStateError(f"User id={closed_by} tidak aktif.")
+
+        # 2. Review, dikunci agar finding, penutupan lain, dan pembukaan
+        # cycle baru untuk review ini menunggu. OF cr: klaim tidak dikunci.
+        cur.execute(
+            """
+            SELECT cr.status, c.nosjp
+            FROM review.claim_reviews AS cr
+            JOIN core.claims AS c ON c.id = cr.claim_id
+            WHERE cr.id = %s
+            FOR NO KEY UPDATE OF cr
+            """,
+            (review_id,),
+        )
+        review = cur.fetchone()
+        if review is None:
+            raise NotFoundError(f"Review id={review_id} tidak ditemukan.")
+        review_status, nosjp = review
+        if review_status != ReviewStatus.OPEN:
+            raise InvalidStateError(
+                f"Review id={review_id} tidak dapat ditutup karena status saat ini "
+                f"adalah {review_status}."
+            )
+
+        # 3. Penutupan. Syarat status OPEN tetap ada sebagai pengaman untuk
+        # penulis lain yang tidak mengambil kunci di atas.
+        cur.execute(
+            """
+            UPDATE review.claim_reviews
+            SET status = %s,
+                final_decision = %s,
+                resolution_note = %s,
+                closed_by = %s,
+                closed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+              AND status = %s
+            RETURNING id, claim_id, status, review_type, cycle_no, final_decision,
+                      resolution_note, opened_by, opened_at, closed_by, closed_at
+            """,
+            (
+                ReviewStatus.CLOSED,
+                final_decision,
+                resolution_note,
+                closed_by,
+                review_id,
+                ReviewStatus.OPEN,
+            ),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ConflictError(
+                f"Review id={review_id} diubah penulis lain saat ditutup; rollback dan ulangi."
+            )
+        (
+            closed_id, claim_id, status, review_type, cycle_no, decision,
+            note, opened_by, opened_at, review_closed_by, closed_at,
+        ) = row
+        closed = ClosedReview(
+            id=closed_id,
+            claim_id=claim_id,
+            nosjp=nosjp,
+            status=status,
+            review_type=review_type,
+            cycle_no=cycle_no,
+            final_decision=decision,
+            resolution_note=note,
+            opened_by=opened_by,
+            opened_at=opened_at,
+            closed_by=review_closed_by,
+            closed_at=closed_at,
+        )
+
+    # 4. Audit, setelah review berhasil ditutup.
+    event = audit_service.record_event(
+        conn,
+        review_id=closed.id,
+        user_id=closed_by,
+        event_type=EventType.REVIEW_CLOSED,
+        entity_type=EntityType.CLAIM_REVIEW,
+        entity_id=closed.id,
+        payload={
+            # Nama kunci sama dengan event script lama.
+            "final_decision": closed.final_decision,
+            "resolution_note": closed.resolution_note,
+        },
+    )
+
+    return CloseReviewResult(review=closed, event=event)

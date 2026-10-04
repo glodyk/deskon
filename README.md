@@ -14,7 +14,7 @@ deskon/                     package Python
 └── services/
     ├── audit_service.py    satu-satunya penulis review.review_events
     ├── finding_service.py  use case finding review (create_review_finding)
-    └── review_service.py   use case lifecycle review (open_review_cycle)
+    └── review_service.py   use case lifecycle review (open_review_cycle, close_review)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)
 └── seeds/
@@ -32,6 +32,7 @@ behavior script lama.
 |---|---|---|
 | `review_service.open_review_cycle(conn, nosjp=, opened_by=, review_type=None)` | `create_new_review_cycle_v1.py` | `REVIEW_OPENED` |
 | `finding_service.create_review_finding(conn, review_id=, finding_category=, finding_title=, finding_description=, created_by=)` | `create_review_finding_v1.py` | `FINDING_CREATED` |
+| `review_service.close_review(conn, review_id=, closed_by=, final_decision=, resolution_note=)` | `close_review_v1.py` | `REVIEW_CLOSED` |
 
 `open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
 klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
@@ -49,6 +50,19 @@ identitas review + `finding_id`, `finding_category`, `status` (judul dan
 deskripsi tidak ikut). Baris review dikunci `FOR SHARE`, sehingga penutupan
 review dan pembuatan finding pada review yang sama berjalan berurutan,
 sedangkan beberapa finding tetap bisa dibuat bersamaan.
+
+`close_review`: `final_decision` di-strip dan di-upper, harus `LAYAK`,
+`TIDAK_LAYAK`, atau `RESELEKSI`; `resolution_note` di-strip dan wajib diisi;
+keduanya divalidasi sebelum database disentuh. User harus ada dan aktif; review
+harus ada dan OPEN (review CLOSED tidak pernah diubah). Review menjadi CLOSED
+dengan `final_decision`, `resolution_note`, `closed_by`, `closed_at`; finding,
+reselection, komentar, dan klaim tidak disentuh. Event `REVIEW_CLOSED` memakai
+entity `claim_review` dan `event_data` berisi identitas review +
+`final_decision`, `resolution_note` (kunci sama dengan script lama). Baris
+review dikunci `FOR NO KEY UPDATE OF cr`: berkonflik dengan `FOR SHARE` milik
+`create_review_finding`, dengan penutupan lain, dan dengan `open_review_cycle`,
+tetapi tidak menahan FK check dan tidak mengunci baris klaim. Klaim yang perlu
+direview lagi mendapat cycle baru lewat `open_review_cycle`.
 
 ## Migration
 

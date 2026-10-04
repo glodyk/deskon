@@ -1,0 +1,8 @@
+# Konfigurasi lokal (berisi password) - jangan di-commit
+.env
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/

@@ -13,6 +13,7 @@ deskon/                     package Python
 ├── db.py                   koneksi psycopg2 dan batas transaksi caller
 └── services/
     ├── audit_service.py    satu-satunya penulis review.review_events
+    ├── finding_service.py  use case finding review (create_review_finding)
     └── review_service.py   use case lifecycle review (open_review_cycle)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)
@@ -30,6 +31,7 @@ behavior script lama.
 | Use case | Menggantikan | Event |
 |---|---|---|
 | `review_service.open_review_cycle(conn, nosjp=, opened_by=, review_type=None)` | `create_new_review_cycle_v1.py` | `REVIEW_OPENED` |
+| `finding_service.create_review_finding(conn, review_id=, finding_category=, finding_title=, finding_description=, created_by=)` | `create_review_finding_v1.py` | `FINDING_CREATED` |
 
 `open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
 klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
@@ -38,6 +40,15 @@ event). Jika tidak, review OPEN baru dibuat dengan `cycle_no` = cycle terakhir
 ini. Baris klaim dikunci (`FOR NO KEY UPDATE`) supaya pembukaan cycle untuk satu
 klaim berjalan berurutan; constraint unik menjadi pengaman terakhir
 (`ConflictError`).
+
+`create_review_finding`: category, title, dan description di-strip dan tidak
+boleh kosong; user harus ada dan aktif; review harus ada dan OPEN (review
+CLOSED ditolak). Finding disimpan DRAFT dengan `created_by`. Event
+`FINDING_CREATED` memakai entity `review_finding` dan `event_data` berisi
+identitas review + `finding_id`, `finding_category`, `status` (judul dan
+deskripsi tidak ikut). Baris review dikunci `FOR SHARE`, sehingga penutupan
+review dan pembuatan finding pada review yang sama berjalan berurutan,
+sedangkan beberapa finding tetap bisa dibuat bersamaan.
 
 ## Migration
 

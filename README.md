@@ -12,16 +12,32 @@ deskon/                     package Python
 ├── errors.py               exception domain
 ├── db.py                   koneksi psycopg2 dan batas transaksi caller
 └── services/
-    └── audit_service.py    satu-satunya penulis review.review_events
+    ├── audit_service.py    satu-satunya penulis review.review_events
+    └── review_service.py   use case lifecycle review (open_review_cycle)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)
 └── seeds/
 tests/
+└── regression/             regression test use case terhadap behavior script lama
 ```
 
 Use case (`open_review_cycle`, `close_review`, `create_finding`, ...) dan CLI
 ditambahkan bertahap; setiap use case disertai regression test terhadap
 behavior script lama.
+
+## Use case
+
+| Use case | Menggantikan | Event |
+|---|---|---|
+| `review_service.open_review_cycle(conn, nosjp=, opened_by=, review_type=None)` | `create_new_review_cycle_v1.py` | `REVIEW_OPENED` |
+
+`open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
+klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
+event). Jika tidak, review OPEN baru dibuat dengan `cycle_no` = cycle terakhir
++ 1 dan `review_type` = parameter eksplisit atau `core.claims.claim_status` saat
+ini. Baris klaim dikunci (`FOR NO KEY UPDATE`) supaya pembukaan cycle untuk satu
+klaim berjalan berurutan; constraint unik menjadi pengaman terakhir
+(`ConflictError`).
 
 ## Migration
 
@@ -42,9 +58,10 @@ database/schema/*.sql -> migration runner -> transaction -> database
 hanya memuat schema ke database tes sementara; itu bukan migration runner
 aplikasi dan tidak boleh dipakai untuk DEV/produksi.
 
-**Kompatibilitas PostgreSQL 14 belum diverifikasi.** `001_baseline.sql` berasal
-dari pg_dump PostgreSQL 14, tetapi tes baru dijalankan di PostgreSQL 16.
-Smoke test di PostgreSQL 14 wajib dilakukan sebelum DEV memakai migration ini.
+**PostgreSQL 14.** `001_baseline.sql` berasal dari pg_dump PostgreSQL 14.
+001 + 002 dan seluruh tes sudah dijalankan di cluster sementara PostgreSQL
+14.24 dan 16. Menjalankan 002 ke DEV tetap langkah terpisah yang menunggu
+keputusan owner.
 
 ## Kontrak service layer
 
@@ -115,5 +132,9 @@ Tidak menyentuh database DEV. Jika binary PostgreSQL tidak ditemukan, tes
 database di-skip; set `DESKON_TEST_PG_BIN` (mis. `/usr/lib/postgresql/14/bin`)
 bila perlu. `initdb` tidak bisa dijalankan sebagai root.
 
-Tes saat ini dijalankan di PostgreSQL 16; PostgreSQL 14 belum diverifikasi
-(lihat bagian Migration).
+Seluruh tes (termasuk memuat 001 + 002) lulus di PostgreSQL 16 dan
+PostgreSQL 14.24:
+
+```
+DESKON_TEST_PG_BIN=/path/ke/postgresql-14/bin pytest
+```

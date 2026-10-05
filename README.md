@@ -14,7 +14,7 @@ deskon/                     package Python
 └── services/
     ├── audit_service.py    satu-satunya penulis review.review_events
     ├── finding_service.py  use case finding review (create_review_finding)
-    ├── reselection_service.py  use case reselection klaim (create_reselection)
+    ├── reselection_service.py  use case reselection klaim (create_reselection, resolve_reselection)
     └── review_service.py   use case lifecycle review (open_review_cycle, close_review)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)
@@ -35,6 +35,7 @@ behavior script lama.
 | `finding_service.create_review_finding(conn, review_id=, finding_category=, finding_title=, finding_description=, created_by=)` | `create_review_finding_v1.py` | `FINDING_CREATED` |
 | `review_service.close_review(conn, review_id=, closed_by=, final_decision=, resolution_note=)` | `close_review_v1.py` | `REVIEW_CLOSED` |
 | `reselection_service.create_reselection(conn, review_id=, created_by=, target_type=, action=, original_code=, reason=, original_description=None, proposed_code=None, proposed_description=None)` | `create_reselection_v1.py` | `RESELECTION_CREATED` |
+| `reselection_service.resolve_reselection(conn, reselection_id=, resolved_by=, decision=)` | `resolve_reselection_v1.py` | `RESELECTION_RESOLVED` |
 
 `open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
 klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
@@ -87,6 +88,37 @@ review yang sama berjalan berurutan, begitu juga `open_review_cycle` pada
 review OPEN yang sama, sedangkan beberapa reselection dan finding tetap bisa
 dibuat bersamaan. Reselection `PROPOSED` yang sudah dibuat tetap apa adanya
 saat review ditutup.
+
+`resolve_reselection`: `decision` di-strip dan di-upper, hanya `AGREED` atau
+`REJECTED`. User harus ada dan aktif. Hanya reselection `PROPOSED` yang dapat
+diselesaikan; `DRAFT`, `AGREED`, `REJECTED`, `CORRECTED`, dan `CANCELLED`
+ditolak (`InvalidStateError`), termasuk resolve ulang dengan keputusan yang
+sama. Review induk harus `OPEN`; review `CLOSED` menolak resolve (sama dengan
+script lama), sehingga reselection `PROPOSED` yang review-nya sudah ditutup
+tetap `PROPOSED`. Urutan pemeriksaan seperti script lama: decision, user,
+reselection ada, status reselection, baru status review. Transisi yang
+terjadi hanya `PROPOSED` -> `AGREED` atau `PROPOSED` -> `REJECTED`. `AGREED`
+mengisi `agreed_by` (= `resolved_by`) dan `agreed_at`; `REJECTED` menyimpan
+`agreed_by` dan `agreed_at` `NULL` (siapa dan kapan tercatat di event, yaitu
+`user_id` dan `created_at`). Kolom lain, termasuk `corrects_reselection_id`,
+tidak berubah, dan tidak ada pemeriksaan kesesuaian `claim_id` reselection
+dengan review (menjadi pekerjaan migration integritas). Event
+`RESELECTION_RESOLVED` memakai entity `claim_reselection` dan `event_data`
+berisi identitas review + `reselection_id`, `target_type`, `action`,
+`original_code`, `proposed_code` (`null` pada DROP), `previous_status`
+(`PROPOSED`), dan `new_status` (`AGREED`/`REJECTED`); kunci sama dengan event
+script lama. `review_id` dibaca tanpa kunci, lalu review dikunci
+`FOR SHARE OF cr` dan reselection `FOR NO KEY UPDATE OF r` (induk dulu; baris
+klaim tidak dikunci). Penutupan review (`close_review`) dan resolve pada
+review yang sama berjalan berurutan; resolve yang menunggu penutupan membaca
+status `CLOSED` dan ditolak. Dua resolve pada reselection yang sama berjalan
+berurutan dan yang kedua ditolak; resolve pada reselection berbeda,
+`create_reselection`, dan `create_review_finding` tidak saling menunggu;
+`open_review_cycle` pada review OPEN yang sama berjalan berurutan dengan
+resolve. `UPDATE` memakai guard `status = 'PROPOSED'`; bila tidak ada baris
+yang berubah, `ConflictError`. Service tidak commit atau rollback;
+transaksi dipegang caller, dan kegagalan audit membatalkan update bersama
+event.
 
 ## Migration
 

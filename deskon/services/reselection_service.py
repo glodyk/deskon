@@ -1,8 +1,8 @@
 """Use case reselection klaim (review.claim_reselections).
 
-Saat ini berisi `create_reselection`. Resolve/correct/cancel belum ada;
-event RESELECTION_RESOLVED masih belum dipancarkan, RESELECTION_CORRECTED
-dan RESELECTION_CANCELLED masih cadangan.
+Saat ini berisi `create_reselection` dan `resolve_reselection`. Correct dan
+cancel belum ada; RESELECTION_CORRECTED dan RESELECTION_CANCELLED masih
+cadangan.
 
 Semua fungsi menerima koneksi dari caller, tidak commit/rollback, tidak
 print, mengembalikan dataclass, dan melempar exception dari deskon.errors.
@@ -20,7 +20,7 @@ from deskon.constants import (
     ReselectionStatus,
     ReviewStatus,
 )
-from deskon.errors import InvalidStateError, NotFoundError, ValidationError
+from deskon.errors import ConflictError, InvalidStateError, NotFoundError, ValidationError
 from deskon.services import audit_service
 from deskon.services.audit_service import ReviewEvent
 
@@ -257,3 +257,181 @@ def create_reselection(
     )
 
     return CreateReselectionResult(reselection=reselection, event=event)
+
+
+@dataclass(frozen=True)
+class ResolveReselectionResult:
+    reselection: ClaimReselection
+    event: ReviewEvent
+
+
+_RESOLVE_DECISIONS = frozenset({ReselectionStatus.AGREED, ReselectionStatus.REJECTED})
+
+
+def resolve_reselection(conn, *, reselection_id, resolved_by, decision):
+    """Selesaikan reselection PROPOSED menjadi AGREED atau REJECTED. Tidak commit.
+
+    - decision di-strip dan di-upper; hanya AGREED atau REJECTED.
+    - User `resolved_by` harus ada dan aktif.
+    - Reselection harus ada dan berstatus PROPOSED; status lain (DRAFT,
+      AGREED, REJECTED, CORRECTED, CANCELLED) ditolak dengan
+      InvalidStateError. Status diperiksa lebih dulu, baru review.
+    - Review induk harus OPEN; review CLOSED menolak resolve (seperti script
+      lama). Reselection PROPOSED tetap apa adanya setelah review ditutup.
+    - AGREED mengisi agreed_by = resolved_by dan agreed_at; REJECTED
+      menyimpan agreed_by/agreed_at NULL. Siapa dan kapan REJECTED tercatat
+      di event (user_id, created_at).
+    - Tidak ada pemeriksaan kesesuaian claim_id reselection dengan review.
+    - Event RESELECTION_RESOLVED (entity claim_reselection) ditulis lewat
+      audit_service di transaksi yang sama.
+
+    Konkurensi: review_id dibaca tanpa kunci, lalu urutan kunci induk dulu:
+    review FOR SHARE OF cr, kemudian reselection FOR NO KEY UPDATE OF r;
+    baris klaim tidak dikunci. close_review menunggu resolve yang berjalan
+    (dan sebaliknya resolve menunggu penutupan, lalu membaca CLOSED dan
+    ditolak). Dua resolve pada reselection yang sama berjalan berurutan;
+    yang kedua melihat status baru dan ditolak. Resolve pada reselection
+    berbeda di review yang sama berjalan bersamaan.
+    """
+    _require_int("reselection_id", reselection_id)
+    _require_int("resolved_by", resolved_by)
+    decision = _choice("decision", decision, _RESOLVE_DECISIONS)
+
+    with conn.cursor() as cur:
+        # 1. User
+        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (resolved_by,))
+        user = cur.fetchone()
+        if user is None:
+            raise NotFoundError(f"User id={resolved_by} tidak ditemukan.")
+        if not user[0]:
+            raise InvalidStateError(f"User id={resolved_by} tidak aktif.")
+
+        # 2. Cari review induk tanpa kunci agar urutan kunci induk dulu.
+        cur.execute(
+            "SELECT review_id FROM review.claim_reselections WHERE id = %s",
+            (reselection_id,),
+        )
+        found = cur.fetchone()
+        if found is None:
+            raise NotFoundError(f"Reselection id={reselection_id} tidak ditemukan.")
+        review_id = found[0]
+
+        # 3. Review dikunci FOR SHARE (OF cr: klaim tidak dikunci).
+        cur.execute(
+            """
+            SELECT cr.status, c.nosjp
+            FROM review.claim_reviews AS cr
+            JOIN core.claims AS c ON c.id = cr.claim_id
+            WHERE cr.id = %s
+            FOR SHARE OF cr
+            """,
+            (review_id,),
+        )
+        review = cur.fetchone()
+        if review is None:
+            raise NotFoundError(f"Review id={review_id} tidak ditemukan.")
+        review_status, nosjp = review
+
+        # 4. Reselection dikunci; review_id dicocokkan dengan review yang
+        # sudah dikunci agar baris tidak berpindah induk.
+        cur.execute(
+            f"""
+            SELECT {_RESELECTION_COLUMNS}
+            FROM review.claim_reselections AS r
+            WHERE r.id = %s AND r.review_id = %s
+            FOR NO KEY UPDATE OF r
+            """,
+            (reselection_id, review_id),
+        )
+        current = cur.fetchone()
+        if current is None:
+            raise NotFoundError(f"Reselection id={reselection_id} tidak ditemukan.")
+        previous_status = current[10]
+
+        # 5. Status reselection dulu, baru review (urutan script lama).
+        if previous_status != ReselectionStatus.PROPOSED:
+            raise InvalidStateError(
+                f"Reselection id={reselection_id} tidak dapat diproses. "
+                f"Status saat ini: {previous_status}. "
+                "Hanya status PROPOSED yang dapat diubah menjadi AGREED atau REJECTED."
+            )
+        if review_status != ReviewStatus.OPEN:
+            raise InvalidStateError(
+                f"Review id={review_id} tidak OPEN. Status saat ini: {review_status}. "
+                "Reselection hanya dapat diselesaikan ketika review masih OPEN."
+            )
+
+        # 6. Satu UPDATE dengan guard status.
+        agreed = decision == ReselectionStatus.AGREED
+        cur.execute(
+            f"""
+            UPDATE review.claim_reselections
+            SET status = %s,
+                agreed_by = %s,
+                agreed_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND status = %s
+            RETURNING {_RESELECTION_COLUMNS}
+            """,
+            (
+                decision,
+                resolved_by if agreed else None,
+                agreed,
+                reselection_id,
+                ReselectionStatus.PROPOSED,
+            ),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ConflictError(
+                f"Reselection id={reselection_id} berubah saat diproses; ulangi."
+            )
+        (
+            row_id, row_review_id, row_claim_id, row_target_type, row_action,
+            row_original_code, row_original_description, row_proposed_code,
+            row_proposed_description, row_reason, status, row_created_by,
+            created_at, updated_at, agreed_by, agreed_at, corrects_reselection_id,
+        ) = row
+        reselection = ClaimReselection(
+            id=row_id,
+            review_id=row_review_id,
+            claim_id=row_claim_id,
+            nosjp=nosjp,
+            target_type=row_target_type,
+            action=row_action,
+            original_code=row_original_code,
+            original_description=row_original_description,
+            proposed_code=row_proposed_code,
+            proposed_description=row_proposed_description,
+            reason=row_reason,
+            status=status,
+            created_by=row_created_by,
+            created_at=created_at,
+            updated_at=updated_at,
+            agreed_by=agreed_by,
+            agreed_at=agreed_at,
+            corrects_reselection_id=corrects_reselection_id,
+        )
+
+    # 7. Audit, setelah UPDATE berhasil.
+    event = audit_service.record_event(
+        conn,
+        review_id=review_id,
+        user_id=resolved_by,
+        event_type=EventType.RESELECTION_RESOLVED,
+        entity_type=EntityType.CLAIM_RESELECTION,
+        entity_id=reselection.id,
+        payload={
+            # Kunci sama dengan event script lama; claim_id, review_id, dan
+            # nosjp datang dari audit_service.
+            "reselection_id": reselection.id,
+            "target_type": reselection.target_type,
+            "action": reselection.action,
+            "original_code": reselection.original_code,
+            "proposed_code": reselection.proposed_code,
+            "previous_status": previous_status,
+            "new_status": reselection.status,
+        },
+    )
+
+    return ResolveReselectionResult(reselection=reselection, event=event)

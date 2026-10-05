@@ -1,7 +1,7 @@
 """Use case lifecycle review klaim (review.claim_reviews).
 
-Saat ini berisi `open_review_cycle` dan `close_review`. Use case lifecycle
-lain ditambahkan di modul ini secara bertahap.
+Saat ini berisi `open_review_cycle`, `close_review`, dan
+`create_review_queue`. Use case lifecycle lain ditambahkan di modul ini secara bertahap.
 
 Semua fungsi menerima koneksi dari caller, tidak commit/rollback, tidak
 print, mengembalikan dataclass, dan melempar exception dari deskon.errors.
@@ -17,6 +17,7 @@ from deskon.constants import (
     REVIEW_TYPES,
     EntityType,
     EventType,
+    ImportBatchStatus,
     ReviewStatus,
 )
 from deskon.errors import (
@@ -383,3 +384,93 @@ def close_review(conn, *, review_id, closed_by, final_decision, resolution_note)
     )
 
     return CloseReviewResult(review=closed, event=event)
+
+
+@dataclass(frozen=True)
+class CreateReviewQueueResult:
+    import_batch_id: int
+    # Jumlah klaim batch; sama dengan len(created) + len(existing).
+    claims_total: int
+    # Review yang dibuat, urut claim_id; events searah dengan created.
+    created: tuple[ClaimReview, ...]
+    # Review OPEN yang sudah ada (tanpa event), urut claim_id.
+    existing: tuple[ClaimReview, ...]
+    events: tuple[ReviewEvent, ...]
+
+
+def create_review_queue(conn, *, import_batch_id, opened_by):
+    """Buka review OPEN untuk setiap klaim milik import batch. Tidak commit.
+
+    Orkestrasi atas `open_review_cycle`; tidak menduplikasi logikanya.
+
+    - Batch harus ada dan berstatus IMPORTED.
+    - Klaim = core.claims dengan source_import_batch_id = batch, urut id;
+      batch tanpa klaim ditolak. Klaim yang sudah punya review OPEN masuk
+      `existing` (tanpa perubahan dan tanpa event); klaim lain mendapat
+      cycle berikutnya, termasuk klaim yang hanya punya riwayat CLOSED.
+    - review_type tiap review dari claim_status klaimnya (lewat
+      open_review_cycle); event REVIEW_OPENED per review yang dibuat.
+    - Validasi user (ada dan aktif) dilakukan open_review_cycle pada klaim
+      pertama; antrian tidak punya salinan sendiri. Karena itu pemeriksaan
+      batch dan klaim mendahului pemeriksaan user.
+    - All-or-nothing: exception dari satu klaim merambat ke caller, yang
+      harus me-rollback transaksi; tidak ada klaim yang dilewati.
+
+    Konkurensi: baris batch dikunci FOR SHARE (status tidak berubah selama
+    antrian; sesama antrian tidak saling menunggu). Klaim diproses urut id
+    naik; setiap klaim dikunci FOR NO KEY UPDATE lalu review OPEN yang ada
+    FOR UPDATE oleh open_review_cycle. Urutan id yang sama membuat antrian
+    yang beririsan berjalan berurutan tanpa deadlock. Review OPEN yang sudah
+    ada ditahan sampai transaksi selesai, sehingga finding, reselection,
+    resolve, dan penutupan pada review itu menunggu.
+    """
+    _require_int("import_batch_id", import_batch_id)
+    _require_int("opened_by", opened_by)
+
+    with conn.cursor() as cur:
+        # 1. Batch, dikunci agar statusnya tidak berubah selama antrian.
+        cur.execute(
+            "SELECT status FROM staging.import_batches WHERE id = %s FOR SHARE",
+            (import_batch_id,),
+        )
+        batch = cur.fetchone()
+        if batch is None:
+            raise NotFoundError(f"Import batch id={import_batch_id} tidak ditemukan.")
+        if batch[0] != ImportBatchStatus.IMPORTED:
+            raise InvalidStateError(
+                f"Batch {import_batch_id} belum berstatus IMPORTED. Status saat ini: {batch[0]}"
+            )
+
+        # 2. Klaim batch; urutan id juga urutan kunci.
+        cur.execute(
+            """
+            SELECT id, nosjp
+            FROM core.claims
+            WHERE source_import_batch_id = %s
+            ORDER BY id
+            """,
+            (import_batch_id,),
+        )
+        claims = cur.fetchall()
+        if not claims:
+            raise NotFoundError(f"Tidak ada core.claims untuk batch {import_batch_id}.")
+
+    # 3. Satu open_review_cycle per klaim, dalam transaksi caller.
+    created = []
+    existing = []
+    events = []
+    for _claim_id, nosjp in claims:
+        result = open_review_cycle(conn, nosjp=nosjp, opened_by=opened_by)
+        if result.created:
+            created.append(result.review)
+            events.append(result.event)
+        else:
+            existing.append(result.review)
+
+    return CreateReviewQueueResult(
+        import_batch_id=import_batch_id,
+        claims_total=len(claims),
+        created=tuple(created),
+        existing=tuple(existing),
+        events=tuple(events),
+    )

@@ -15,7 +15,7 @@ deskon/                     package Python
     ├── audit_service.py    satu-satunya penulis review.review_events
     ├── finding_service.py  use case finding review (create_review_finding)
     ├── reselection_service.py  use case reselection klaim (create_reselection, resolve_reselection)
-    └── review_service.py   use case lifecycle review (open_review_cycle, close_review)
+    └── review_service.py   use case lifecycle review (open_review_cycle, close_review, create_review_queue)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)
 └── seeds/
@@ -36,6 +36,7 @@ behavior script lama.
 | `review_service.close_review(conn, review_id=, closed_by=, final_decision=, resolution_note=)` | `close_review_v1.py` | `REVIEW_CLOSED` |
 | `reselection_service.create_reselection(conn, review_id=, created_by=, target_type=, action=, original_code=, reason=, original_description=None, proposed_code=None, proposed_description=None)` | `create_reselection_v1.py` | `RESELECTION_CREATED` |
 | `reselection_service.resolve_reselection(conn, reselection_id=, resolved_by=, decision=)` | `resolve_reselection_v1.py` | `RESELECTION_RESOLVED` |
+| `review_service.create_review_queue(conn, import_batch_id=, opened_by=)` | `create_review_queue_v1.py` | `REVIEW_OPENED` (per review yang dibuat) |
 
 `open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
 klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
@@ -119,6 +120,37 @@ resolve. `UPDATE` memakai guard `status = 'PROPOSED'`; bila tidak ada baris
 yang berubah, `ConflictError`. Service tidak commit atau rollback;
 transaksi dipegang caller, dan kegagalan audit membatalkan update bersama
 event.
+
+`create_review_queue`: membuka review OPEN untuk setiap klaim milik satu import
+batch. Ini orkestrasi: setiap klaim diproses oleh `open_review_cycle`, tanpa
+menduplikasi logikanya. `import_batch_id` dan `opened_by` harus integer.
+Batch harus ada dan berstatus `IMPORTED`, lalu harus punya klaim; batch dan klaim
+diperiksa sebelum user, karena validasi user (ada dan aktif) dilakukan
+`open_review_cycle` pada klaim pertama dan antrian tidak punya salinan sendiri.
+Klaim = `core.claims` dengan `source_import_batch_id` = batch, urut `id`; klaim
+yang Nosjp-nya sudah ada saat promote tidak bertanda batch ini dan tidak ikut
+(item 22, belum diperbaiki). Klaim yang sudah punya review OPEN masuk
+`existing` tanpa perubahan dan tanpa event. Klaim lain mendapat cycle berikutnya
+(`REVIEW_OPENED`), termasuk klaim yang hanya punya riwayat CLOSED: **menjalankan
+ulang antrian setelah review ditutup membuka cycle baru untuk klaim itu**,
+sedangkan menjalankannya ulang saat semua klaim sudah OPEN tidak mengubah
+apa pun. `review_type` tiap review diambil dari `claim_status` klaimnya sendiri
+(tidak ada nilai tunggal untuk batch). Event memakai payload `open_review_cycle`
+apa adanya (tanpa `import_batch_id`); antrian tidak menulis event sendiri. Hasil
+`CreateReviewQueueResult`: `import_batch_id`, `claims_total`, `created`,
+`existing`, `events`. All-or-nothing: exception dari satu klaim merambat ke
+caller yang harus me-rollback transaksi; tidak ada klaim yang dilewati dan tidak
+ada commit parsial. Baris batch dikunci `FOR SHARE` (sesama antrian tidak saling
+menunggu; penulis yang mengubah baris batch menunggu). Klaim diproses urut `id`
+naik, masing-masing dikunci `FOR NO KEY UPDATE` lalu review OPEN yang ada
+`FOR UPDATE` oleh `open_review_cycle`, sehingga antrian yang bersamaan berjalan
+berurutan tanpa deadlock dan `open_review_cycle` pada klaim yang sama berurutan
+dengan antrian. Review OPEN yang sudah ada ditahan sampai transaksi antrian
+selesai: `create_review_finding`, `create_reselection`, `resolve_reselection`,
+dan `close_review` pada review itu menunggu (dan sebaliknya antrian menunggu
+mereka); jika `close_review` commit lebih dulu, antrian membuka cycle baru.
+Perilaku ini mengikuti `open_review_cycle`. Service tidak commit atau rollback;
+transaksi dipegang caller. Membutuhkan migration 002 (`cycle_no`, `review_type`).
 
 ## Migration
 

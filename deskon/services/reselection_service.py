@@ -21,7 +21,7 @@ from deskon.constants import (
     ReviewStatus,
 )
 from deskon.errors import ConflictError, InvalidStateError, NotFoundError, ValidationError
-from deskon.services import audit_service
+from deskon.services import audit_service, user_service
 from deskon.services.audit_service import ReviewEvent
 
 
@@ -157,12 +157,7 @@ def create_reselection(
 
     with conn.cursor() as cur:
         # 1. User
-        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (created_by,))
-        user = cur.fetchone()
-        if user is None:
-            raise NotFoundError(f"User id={created_by} tidak ditemukan.")
-        if not user[0]:
-            raise InvalidStateError(f"User id={created_by} tidak aktif.")
+        user_service.require_active_user(conn, created_by)
 
         # 2. Review, dikunci agar tidak ditutup selagi reselection dibuat.
         # OF cr: baris klaim tidak dikunci.
@@ -299,12 +294,7 @@ def resolve_reselection(conn, *, reselection_id, resolved_by, decision):
 
     with conn.cursor() as cur:
         # 1. User
-        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (resolved_by,))
-        user = cur.fetchone()
-        if user is None:
-            raise NotFoundError(f"User id={resolved_by} tidak ditemukan.")
-        if not user[0]:
-            raise InvalidStateError(f"User id={resolved_by} tidak aktif.")
+        user_service.require_active_user(conn, resolved_by)
 
         # 2. Cari review induk tanpa kunci agar urutan kunci induk dulu.
         cur.execute(

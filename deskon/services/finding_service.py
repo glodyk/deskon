@@ -12,7 +12,7 @@ from datetime import datetime
 
 from deskon.constants import EntityType, EventType, FindingStatus, ReviewStatus
 from deskon.errors import InvalidStateError, NotFoundError, ValidationError
-from deskon.services import audit_service
+from deskon.services import audit_service, user_service
 from deskon.services.audit_service import ReviewEvent
 
 
@@ -95,12 +95,7 @@ def create_review_finding(
 
     with conn.cursor() as cur:
         # 1. User
-        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (created_by,))
-        user = cur.fetchone()
-        if user is None:
-            raise NotFoundError(f"User id={created_by} tidak ditemukan.")
-        if not user[0]:
-            raise InvalidStateError(f"User id={created_by} tidak aktif.")
+        user_service.require_active_user(conn, created_by)
 
         # 2. Review, dikunci agar tidak ditutup selagi finding dibuat.
         cur.execute(

@@ -15,6 +15,7 @@ deskon/                     package Python
     ├── audit_service.py    satu-satunya penulis review.review_events
     ├── finding_service.py  use case finding review (create_review_finding)
     ├── reselection_service.py  use case reselection klaim (create_reselection, resolve_reselection)
+    ├── user_service.py     validasi user bersama (require_active_user: ada, lalu aktif)
     └── review_service.py   use case lifecycle review (open_review_cycle, close_review, create_review_queue)
 database/
 ├── schema/                 migration berurutan (001, 002, ...)

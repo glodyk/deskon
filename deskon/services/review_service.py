@@ -26,7 +26,7 @@ from deskon.errors import (
     NotFoundError,
     ValidationError,
 )
-from deskon.services import audit_service
+from deskon.services import audit_service, user_service
 from deskon.services.audit_service import ReviewEvent
 
 
@@ -136,12 +136,7 @@ def open_review_cycle(conn, *, nosjp, opened_by, review_type=None):
 
     with conn.cursor() as cur:
         # 1. User
-        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (opened_by,))
-        user = cur.fetchone()
-        if user is None:
-            raise NotFoundError(f"User id={opened_by} tidak ditemukan.")
-        if not user[0]:
-            raise InvalidStateError(f"User id={opened_by} tidak aktif.")
+        user_service.require_active_user(conn, opened_by)
 
         # 2. Klaim, dikunci untuk menserialkan pembukaan cycle per klaim.
         # FOR NO KEY UPDATE (bukan FOR UPDATE) agar insert lain yang hanya
@@ -290,12 +285,7 @@ def close_review(conn, *, review_id, closed_by, final_decision, resolution_note)
 
     with conn.cursor() as cur:
         # 1. User
-        cur.execute("SELECT is_active FROM core.users WHERE id = %s", (closed_by,))
-        user = cur.fetchone()
-        if user is None:
-            raise NotFoundError(f"User id={closed_by} tidak ditemukan.")
-        if not user[0]:
-            raise InvalidStateError(f"User id={closed_by} tidak aktif.")
+        user_service.require_active_user(conn, closed_by)
 
         # 2. Review, dikunci agar finding, penutupan lain, dan pembukaan
         # cycle baru untuk review ini menunggu. OF cr: klaim tidak dikunci.

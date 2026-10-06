@@ -15,6 +15,7 @@ deskon/                     package Python
     ├── audit_service.py    satu-satunya penulis review.review_events
     ├── finding_service.py  use case finding review (create_review_finding)
     ├── reselection_service.py  use case reselection klaim (create_reselection, resolve_reselection)
+    ├── preliminary_note_service.py  use case catatan pendahuluan klaim (import_preliminary_notes)
     ├── user_service.py     validasi user bersama (require_active_user: ada, lalu aktif)
     └── review_service.py   use case lifecycle review (open_review_cycle, close_review, create_review_queue)
 database/
@@ -38,6 +39,7 @@ behavior script lama.
 | `reselection_service.create_reselection(conn, review_id=, created_by=, target_type=, action=, original_code=, reason=, original_description=None, proposed_code=None, proposed_description=None)` | `create_reselection_v1.py` | `RESELECTION_CREATED` |
 | `reselection_service.resolve_reselection(conn, reselection_id=, resolved_by=, decision=)` | `resolve_reselection_v1.py` | `RESELECTION_RESOLVED` |
 | `review_service.create_review_queue(conn, import_batch_id=, opened_by=)` | `create_review_queue_v1.py` | `REVIEW_OPENED` (per review yang dibuat) |
+| `preliminary_note_service.import_preliminary_notes(conn, created_by=, notes=)` | `import_preliminary_notes_v1.py` | tidak ada |
 
 `open_review_cycle`: user harus ada dan aktif; klaim dicari lewat Nosjp. Jika
 klaim sudah punya review OPEN, review itu dikembalikan (`created=False`, tanpa
@@ -152,6 +154,27 @@ dan `close_review` pada review itu menunggu (dan sebaliknya antrian menunggu
 mereka); jika `close_review` commit lebih dulu, antrian membuka cycle baru.
 Perilaku ini mengikuti `open_review_cycle`. Service tidak commit atau rollback;
 transaksi dipegang caller. Membutuhkan migration 002 (`cycle_no`, `review_type`).
+
+`import_preliminary_notes`: menambah catatan pendahuluan klaim-level untuk
+beberapa klaim sekaligus. `notes` adalah list/tuple pasangan `(nosjp, note)`;
+parsing CSV tetap tugas CLI, service tidak menerima path file. `created_by`
+harus integer dan user aktif (`require_active_user`). `nosjp` dan `note`
+di-strip dan tidak boleh kosong; batch kosong valid (`rows_total=0`, tanpa
+INSERT). Urutan: bentuk argumen, `created_by`, user, seluruh baris, resolusi
+seluruh Nosjp ke `claim_id`, baru INSERT satu baris per input. Tidak ada INSERT
+sebelum seluruh input dan seluruh klaim valid; jika beberapa Nosjp tidak
+ditemukan, yang pertama menurut urutan input yang dilaporkan (`NotFoundError`).
+Satu-satunya prasyarat klaim adalah Nosjp ada: tanpa syarat status klaim atau
+review, tanpa lock pada klaim, dan tanpa event (`preliminary_note` belum punya
+event; audit klaim-level belum dirancang). Catatan bersifat klaim-level dan
+hanya bertambah (append-only): satu klaim boleh punya banyak catatan, tidak
+terhubung ke review atau cycle, dan tidak ada update/hapus. Hasil:
+`ImportPreliminaryNotesResult(created_by, rows_total, created, notes)` dengan
+`notes` berurutan seperti input (`note_id`, `claim_id`, `nosjp`). Service tidak
+commit atau rollback; transaksi dipegang caller (berhasil: commit seluruh batch,
+gagal: rollback seluruh batch). **Peringatan re-run:** tidak ada deteksi
+duplikat dan tidak ada idempotency lintas run; menjalankan batch yang sama lagi
+(atau baris yang sama dua kali) membuat catatan baru.
 
 ## Migration
 
